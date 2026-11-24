@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --brand-primary: #FC8019;
+    --brand-warm-bg: #FFF8F2;
+    --text-primary: #242424;
+    --text-secondary: #77716C;
+  }
+
+  body {
+    background-color: #FFF8F2;
+    color: #242424;
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    letter-spacing: -0.02em;
+  }
+}
+
+/* Custom micro-interactions and transitions */
+.animate-fade-in {
+  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Smooth pulse for live badges */
+.pulse-glow {
+  box-shadow: 0 0 0 0 rgba(252, 128, 25, 0.5);
+  animation: pulseGlow 2s infinite;
+}
+
+@keyframes pulseGlow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(252, 128, 25, 0.4);
+  }
+
+  70% {
+    box-shadow: 0 0 0 8px rgba(252, 128, 25, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(252, 128, 25, 0);
+  }
+}
+
+/* Hide scrollbar for category row while preserving touch scroll */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
