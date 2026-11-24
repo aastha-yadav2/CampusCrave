@@ -17,12 +17,30 @@ export type FilterPreset =
   | 'popular'
   | 'budget_friendly';
 
+export type DealLifecycleState =
+  | 'ACTIVE'
+  | 'LOCKING'
+  | 'UNLOCKED'
+  | 'EXPIRED'
+  | 'CANCELLED';
+
+export interface DealTier {
+  id: string;
+  tierNumber: number;
+  participantsRequired: number;
+  rewardType: 'discount' | 'free_item' | 'cashback';
+  rewardValue: number; // e.g. 20 for 20%, 40 for ₹40 off
+  title: string;
+  description: string;
+}
+
 export interface Participant {
   id: string;
   name: string;
   initial: string;
   avatarBg: string;
   role?: string;
+  joinedAt?: number;
 }
 
 export interface MenuItem {
@@ -44,19 +62,37 @@ export interface Craving {
   zone: string;
   timeWindow: string;
   count: number;
-  target: number;
-  deal: string;
-  dealDiscount: number; // e.g. ₹35 or ₹40 off
+  target: number; // Maximum / final tier target
+  deal: string; // Dynamic based on tier
+  dealDiscount: number; // Applied discount at current tier
   priceRange: string;
   budgetPerPerson: number;
   image: string;
   deadlineMinutes: number;
-  status: 'ACTIVE' | 'DEAL_UNLOCKED' | 'ORDERING' | 'EXPIRED';
+  status: DealLifecycleState;
+  tiers: DealTier[];
+  currentTierId: string | null;
+  createdAt: number;
+  expiresAt: number;
   joined?: boolean;
   isUserCreated?: boolean;
   participants: Participant[];
   menu: MenuItem[];
   unlockedAt?: number;
+  lockedAt?: number;
+  expiredAt?: number;
+  celebrationShown?: boolean;
+}
+
+export interface TierProgressSummary {
+  currentTier: DealTier | null;
+  nextTier: DealTier | null;
+  remainingToNextTier: number;
+  tierProgressPercentage: number;
+  overallProgressPercentage: number;
+  bestAvailableReward: string;
+  isFullyUnlocked: boolean;
+  unlockedTiersCount: number;
 }
 
 export interface CravingInput {
@@ -94,6 +130,7 @@ export interface PlacedOrder {
   itemTotal: number;
   dealDiscount: number;
   finalTotal: number;
+  isRegularPriceFallback?: boolean;
   placedAt: string;
   estimatedDelivery: string;
   status: 'ORDER_PLACED' | 'KITCHEN_ACCEPTED' | 'ON_THE_WAY';

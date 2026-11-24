@@ -58,7 +58,7 @@ export const MyCravingsView: React.FC<MyCravingsViewProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {joinedCravings.map((craving) => {
-            const isUnlocked = craving.count >= craving.target || craving.status === 'DEAL_UNLOCKED';
+            const isUnlocked = craving.count >= craving.target || craving.status === 'UNLOCKED';
             const remaining = Math.max(0, craving.target - craving.count);
 
             return (

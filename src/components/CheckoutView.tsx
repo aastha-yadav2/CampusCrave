@@ -4,11 +4,8 @@ import {
   ShoppingBag,
   MapPin,
   Wallet,
-  CheckCircle2,
-  ShieldCheck,
-  Building2,
-  Clock,
   Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 import { Craving, OrderItem, PlacedOrder } from '../types';
 import { formatCurrency } from '../utils/formatters';
@@ -18,6 +15,7 @@ interface CheckoutViewProps {
   items: OrderItem[];
   itemTotal: number;
   discount: number;
+  isRegularPriceFallback?: boolean;
   onBack: () => void;
   onOrderPlaced: (order: PlacedOrder) => void;
 }
@@ -27,13 +25,15 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   items,
   itemTotal,
   discount,
+  isRegularPriceFallback = false,
   onBack,
   onOrderPlaced,
 }) => {
   const [deliveryNote, setDeliveryNote] = useState('Meet at hostel reception gate');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const finalTotal = Math.max(0, itemTotal - discount);
+  const appliedDiscount = isRegularPriceFallback ? 0 : discount;
+  const finalTotal = Math.max(0, itemTotal - appliedDiscount);
 
   const handlePlaceOrder = () => {
     setIsSubmitting(true);
@@ -45,8 +45,9 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         zone: craving.zone,
         items,
         itemTotal,
-        dealDiscount: discount,
+        dealDiscount: appliedDiscount,
         finalTotal,
+        isRegularPriceFallback,
         placedAt: 'Just now',
         estimatedDelivery: 'Tonight · 25-30 mins',
         status: 'ORDER_PLACED',
@@ -78,9 +79,21 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             Review Your Order
           </h1>
           <p className="text-xs sm:text-sm text-charcoal-600 mt-1">
-            Your collective pool deal has been applied to your individual meal.
+            {isRegularPriceFallback
+              ? 'Ordering at standard restaurant menu price.'
+              : 'Your collective pool deal has been applied to your individual meal.'}
           </p>
         </div>
+
+        {/* Regular Price Notice Banner if Fallback */}
+        {isRegularPriceFallback && (
+          <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex items-start gap-2.5 text-xs text-amber-900">
+            <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] leading-relaxed">
+              <b>Regular Price Notice:</b> This group deal did not reach its target before closing. You are purchasing your selected meal at standard menu pricing without the collective reward.
+            </p>
+          </div>
+        )}
 
         {/* Restaurant Header */}
         <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-cream-50/70 border border-stone-200">
@@ -91,7 +104,9 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           />
           <div>
             <div className="font-bold text-sm text-charcoal-900">{craving.restaurant}</div>
-            <div className="text-xs text-brand-600 font-semibold">{craving.deal}</div>
+            <div className={`text-xs font-semibold ${isRegularPriceFallback ? 'text-charcoal-500 line-through' : 'text-brand-600'}`}>
+              {craving.deal}
+            </div>
           </div>
         </div>
 
@@ -151,7 +166,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
               Prototype Payment Simulation
             </div>
             <p className="text-[11px] text-charcoal-600 mt-0.5 leading-relaxed">
-              No real bank transaction or credit card required. This simulates your individual student checkout with collective group discount applied.
+              No real bank transaction or credit card required. This simulates your individual student checkout.
             </p>
           </div>
         </div>
@@ -162,10 +177,12 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             <span>Item Total</span>
             <span className="font-semibold">{formatCurrency(itemTotal)}</span>
           </div>
-          <div className="flex items-center justify-between text-xs text-emerald-600 font-bold">
-            <span>Campus Crave Pool Savings</span>
-            <span>- {formatCurrency(discount)}</span>
-          </div>
+          {!isRegularPriceFallback && (
+            <div className="flex items-center justify-between text-xs text-emerald-600 font-bold">
+              <span>Campus Crave Pool Savings</span>
+              <span>- {formatCurrency(appliedDiscount)}</span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-xs text-charcoal-500">
             <span>Delivery & Campus platform fee</span>
             <span className="text-emerald-600 font-semibold">₹0 (Demo)</span>

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Compass,
@@ -23,6 +23,27 @@ import {
 import { CAMPUSES } from './data/campuses';
 import { INITIAL_CRAVINGS, FOOD_IMAGES } from './data/mockCravings';
 import { findCompatibleCravings } from './utils/cravingMatcher';
+import { generateDefaultTiers } from './engine/dealTiers';
+import {
+  joinCravingPool,
+  leaveCravingPool,
+  simulateStudentsJoining,
+  advanceToNextTier,
+  forceInstantUnlock,
+  forceInstantExpiration,
+  evaluateCravingExpiry,
+  DEMO_USER_ID,
+} from './engine/dealEngine';
+import { useDealTimer } from './hooks/useDealTimer';
+import {
+  loadStoredCravings,
+  saveStoredCravings,
+  loadStoredOrders,
+  saveStoredOrders,
+  loadDemoModeState,
+  saveDemoModeState,
+  clearAndResetStorage,
+} from './engine/storage';
 
 import { Navbar } from './components/Navbar';
 import { Hero } from './components/Hero';
@@ -38,6 +59,8 @@ import { OrdersView } from './components/OrdersView';
 import { SmartMatchModal } from './components/SmartMatchModal';
 import { CreateCravingModal } from './components/CreateCravingModal';
 import { CampusSelectorModal } from './components/CampusSelectorModal';
+import { DealExpiredModal } from './components/DealExpiredModal';
+import { DemoControlPanel } from './components/DemoControlPanel';
 import { Toast, ToastMessage } from './components/Toast';
 
 export function App() {
@@ -50,17 +73,21 @@ export function App() {
   const [selectedCampus, setSelectedCampus] = useState(CAMPUSES[0]);
   const [selectedZone, setSelectedZone] = useState(CAMPUSES[0].zones[0]);
 
-  // Cravings and order state
-  const [cravings, setCravings] = useState<Craving[]>(INITIAL_CRAVINGS);
+  // Cravings and order state with local storage persistence
+  const [cravings, setCravings] = useState<Craving[]>(() => loadStoredCravings());
   const [activeCravingId, setActiveCravingId] = useState<number>(1);
-  const [placedOrders, setPlacedOrders] = useState<PlacedOrder[]>([]);
+  const [placedOrders, setPlacedOrders] = useState<PlacedOrder[]>(() => loadStoredOrders());
   const [activeOrder, setActiveOrder] = useState<PlacedOrder | null>(null);
+
+  // Judge Demo Mode State
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => loadDemoModeState());
 
   // Checkout intermediate state
   const [checkoutData, setCheckoutData] = useState<{
     items: OrderItem[];
     itemTotal: number;
     discount: number;
+    isRegularPriceFallback?: boolean;
   } | null>(null);
 
   // Search & Filter state
@@ -72,6 +99,7 @@ export function App() {
   const [campusModalOpen, setCampusModalOpen] = useState(false);
   const [createCravingOpen, setCreateCravingOpen] = useState(false);
   const [smartMatchOpen, setSmartMatchOpen] = useState(false);
+  const [expiredModalOpen, setExpiredModalOpen] = useState(false);
   const [smartMatches, setSmartMatches] = useState<MatchScoreBreakdown[]>([]);
   const [pendingCravingInput, setPendingCravingInput] = useState<CravingInput | null>(null);
 
@@ -81,6 +109,40 @@ export function App() {
   const showToast = (message: string, title?: string, type: 'success' | 'info' | 'warning' = 'success') => {
     setToast({ id: Date.now().toString(), message, title, type });
   };
+
+  // Sync cravings to localStorage whenever changed
+  useEffect(() => {
+    saveStoredCravings(cravings);
+  }, [cravings]);
+
+  // Sync orders to localStorage
+  useEffect(() => {
+    saveStoredOrders(placedOrders);
+  }, [placedOrders]);
+
+  // Sync demo mode
+  useEffect(() => {
+    saveDemoModeState(isDemoMode);
+  }, [isDemoMode]);
+
+  // Real-time second-by-second countdown hook
+  const { now } = useDealTimer(cravings, (expiredId) => {
+    setCravings((prev) =>
+      prev.map((c) => {
+        if (c.id !== expiredId) return c;
+        const res = evaluateCravingExpiry(c, Date.now());
+        if (res.updated) {
+          if (res.transition === 'UNLOCKED') {
+            showToast(`Time ended and target reached! Deal unlocked for ${c.restaurant}`, 'Deal Secured! 🎉');
+          } else if (res.transition === 'EXPIRED') {
+            showToast(`Ordering window ended for ${c.restaurant} without reaching group target.`, 'Pool Expired', 'warning');
+          }
+          return res.craving;
+        }
+        return c;
+      })
+    );
+  });
 
   // Active craving reference
   const currentCraving = useMemo(
@@ -101,7 +163,7 @@ export function App() {
   const stats = useMemo(() => {
     const active = cravings.filter((c) => c.status === 'ACTIVE').length;
     const students = cravings.reduce((sum, c) => sum + c.count, 0);
-    const unlocked = cravings.filter((c) => c.count >= c.target || c.status === 'DEAL_UNLOCKED').length;
+    const unlocked = cravings.filter((c) => c.status === 'UNLOCKED' || c.count >= c.target).length;
     return {
       activeCravings: active,
       studentsParticipating: students,
@@ -128,13 +190,15 @@ export function App() {
 
       // 3. Preset filters
       if (selectedFilter === 'almost_unlocked') {
-        return craving.count >= craving.target - 2 && craving.count < craving.target;
+        const progress = craving.count / craving.target;
+        return progress >= 0.7 && craving.status === 'ACTIVE';
       }
       if (selectedFilter === 'ending_soon') {
-        return craving.deadlineMinutes <= 12;
+        const remainingSeconds = Math.max(0, Math.floor((craving.expiresAt - now) / 1000));
+        return remainingSeconds <= 12 * 60 && craving.status === 'ACTIVE';
       }
       if (selectedFilter === 'popular') {
-        return craving.count >= 7;
+        return craving.count >= 6;
       }
       if (selectedFilter === 'budget_friendly') {
         return craving.budgetPerPerson <= 160;
@@ -142,67 +206,50 @@ export function App() {
 
       return true;
     });
-  }, [cravings, selectedCategory, searchQuery, selectedFilter]);
+  }, [cravings, selectedCategory, searchQuery, selectedFilter, now]);
 
   // Joined cravings count
   const joinedCount = useMemo(() => cravings.filter((c) => c.joined).length, [cravings]);
 
-  // ===================== USER ACTIONS =====================
+  // ===================== USER & ENGINE ACTIONS =====================
 
   const handleJoinCraving = (id: number) => {
     const targetCraving = cravings.find((c) => c.id === id);
     if (!targetCraving) return;
 
-    if (targetCraving.joined) {
-      showToast('You are already part of this craving pool!', targetCraving.restaurant, 'info');
+    if (targetCraving.status === 'EXPIRED') {
+      setActiveCravingId(id);
+      setExpiredModalOpen(true);
+      return;
+    }
+
+    if (targetCraving.status === 'UNLOCKED') {
+      setActiveCravingId(id);
+      setCurrentView('deal');
+      return;
+    }
+
+    const res = joinCravingPool(targetCraving);
+
+    if (!res.success) {
+      showToast(res.message || 'Cannot join this craving pool.', targetCraving.restaurant, 'info');
       setActiveCravingId(id);
       setCurrentView('live');
       return;
     }
 
-    if (targetCraving.count >= targetCraving.target) {
-      showToast('This pool has reached capacity and unlocked!', targetCraving.restaurant, 'info');
-      setActiveCravingId(id);
-      setCurrentView('deal');
-      return;
-    }
-
-    const nextCount = targetCraving.count + 1;
-    const willUnlock = nextCount >= targetCraving.target;
-
-    setCravings((prev) =>
-      prev.map((c) => {
-        if (c.id !== id) return c;
-        return {
-          ...c,
-          count: nextCount,
-          joined: true,
-          status: willUnlock ? 'DEAL_UNLOCKED' : c.status,
-          participants: [
-            ...c.participants,
-            {
-              id: 'user-aastha',
-              name: 'Aastha Sharma (You)',
-              initial: 'AS',
-              avatarBg: 'bg-brand-500 text-white font-bold',
-              role: 'You',
-            },
-          ],
-        };
-      })
-    );
-
+    setCravings((prev) => prev.map((c) => (c.id === id ? res.craving : c)));
     setActiveCravingId(id);
 
-    if (willUnlock) {
+    if (res.justUnlocked) {
       showToast(
-        `🎉 Congratulations! You reached ${targetCraving.target} students and unlocked: ${targetCraving.deal}`,
+        `🎉 Congratulations! You reached ${res.craving.target} students and unlocked: ${res.craving.deal}`,
         'Deal Unlocked!'
       );
       setCurrentView('deal');
     } else {
       showToast(
-        `You joined ${targetCraving.restaurant}! Just ${targetCraving.target - nextCount} more needed.`,
+        `You joined ${res.craving.restaurant}! Just ${res.craving.target - res.craving.count} more needed for maximum reward.`,
         'Joined Craving Pool'
       );
       setCurrentView('live');
@@ -210,82 +257,94 @@ export function App() {
   };
 
   const handleLeaveCraving = (id: number) => {
-    setCravings((prev) =>
-      prev.map((c) => {
-        if (c.id !== id) return c;
-        const newCount = Math.max(0, c.count - 1);
-        return {
-          ...c,
-          count: newCount,
-          joined: false,
-          status: newCount < c.target ? 'ACTIVE' : c.status,
-          participants: c.participants.filter((p) => p.id !== 'user-aastha'),
-        };
-      })
-    );
+    const targetCraving = cravings.find((c) => c.id === id);
+    if (!targetCraving) return;
 
+    const res = leaveCravingPool(targetCraving);
+    if (!res.success) {
+      showToast(res.message || 'Could not leave craving pool.', undefined, 'warning');
+      return;
+    }
+
+    setCravings((prev) => prev.map((c) => (c.id === id ? res.craving : c)));
+    setExpiredModalOpen(false);
     showToast('You left the craving pool.', undefined, 'info');
     setCurrentView('feed');
   };
 
-  const handleSimulateStudentJoin = (id: number) => {
-    const names = [
-      { name: 'Devansh Kapoor', initial: 'DK', bg: 'bg-teal-100 text-teal-800' },
-      { name: 'Ananya Mishra', initial: 'AM', bg: 'bg-purple-100 text-purple-800' },
-      { name: 'Rishabh Saini', initial: 'RS', bg: 'bg-blue-100 text-blue-800' },
-      { name: 'Natasha Varma', initial: 'NV', bg: 'bg-rose-100 text-rose-800' },
-    ];
-    const pick = names[Math.floor(Math.random() * names.length)];
+  // ===================== JUDGE DEMO MODE CONTROLS =====================
 
-    let unlockedNow = false;
+  const handleDemoSimulateCount = (countToAdd: number) => {
+    const res = simulateStudentsJoining(currentCraving, countToAdd);
+    if (!res.success) {
+      showToast(res.message || 'Simulation failed', undefined, 'warning');
+      return;
+    }
 
-    setCravings((prev) =>
-      prev.map((c) => {
-        if (c.id !== id) return c;
-        if (c.count >= c.target) return c;
+    setCravings((prev) => prev.map((c) => (c.id === currentCraving.id ? res.craving : c)));
 
-        const nextCount = c.count + 1;
-        unlockedNow = nextCount >= c.target;
-
-        return {
-          ...c,
-          count: nextCount,
-          status: unlockedNow ? 'DEAL_UNLOCKED' : c.status,
-          participants: [
-            ...c.participants,
-            {
-              id: `sim-${Date.now()}`,
-              name: pick.name,
-              initial: pick.initial,
-              avatarBg: pick.bg,
-            },
-          ],
-        };
-      })
-    );
-
-    if (unlockedNow) {
-      showToast(
-        'Goal reached! The collective restaurant deal is now unlocked!',
-        'Deal Unlocked Today! 🚀'
-      );
+    if (res.justUnlocked) {
+      showToast(`Goal reached! Collective deal unlocked for ${res.craving.restaurant}!`, 'Deal Unlocked! 🚀');
     } else {
-      showToast(`${pick.name} joined this campus craving!`, 'New Craver Joined');
+      showToast(`Simulated +${countToAdd} students joining ${res.craving.restaurant}!`, 'Demo Simulation');
     }
   };
 
-  // Craving creation & smart matching engine flow
+  const handleDemoAdvanceTier = () => {
+    const res = advanceToNextTier(currentCraving);
+    if (!res.success) {
+      showToast(res.message || 'Could not advance tier.', undefined, 'info');
+      return;
+    }
+    setCravings((prev) => prev.map((c) => (c.id === currentCraving.id ? res.craving : c)));
+    showToast(`Advanced ${res.craving.restaurant} to next reward tier!`, 'Tier Milestone Reached 🏆');
+  };
+
+  const handleDemoForceUnlock = () => {
+    const res = forceInstantUnlock(currentCraving);
+    if (!res.success) {
+      showToast(res.message || 'Could not unlock.', undefined, 'info');
+      return;
+    }
+    setCravings((prev) => prev.map((c) => (c.id === currentCraving.id ? res.craving : c)));
+    showToast(`Instantly unlocked collective reward for ${res.craving.restaurant}!`, 'Judge Override: Deal Unlocked 🎉');
+  };
+
+  const handleDemoForceExpire = () => {
+    const res = forceInstantExpiration(currentCraving);
+    if (!res.success) {
+      showToast(res.message || 'Could not expire deal.', undefined, 'warning');
+      return;
+    }
+    setCravings((prev) => prev.map((c) => (c.id === currentCraving.id ? res.craving : c)));
+    setExpiredModalOpen(true);
+    showToast(`Window forced to expired for ${res.craving.restaurant}.`, 'Judge Override: Craving Expired', 'warning');
+  };
+
+  const handleDemoResetCraving = () => {
+    const initial = INITIAL_CRAVINGS.find((c) => c.id === currentCraving.id) || INITIAL_CRAVINGS[0];
+    const resetOne: Craving = {
+      ...initial,
+      createdAt: Date.now() - 5 * 60 * 1000,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+      status: 'ACTIVE',
+    };
+    setCravings((prev) => prev.map((c) => (c.id === currentCraving.id ? resetOne : c)));
+    setExpiredModalOpen(false);
+    showToast(`Reset ${currentCraving.restaurant} back to demo state.`, 'Craving Reset');
+  };
+
+  // ===================== CREATION & MATCHING =====================
+
   const handleCheckAndCreate = (input: CravingInput) => {
     const matches = findCompatibleCravings(input, cravings);
 
     if (matches.length > 0) {
-      // Found matching pools! Show Smart Match Screen
       setPendingCravingInput(input);
       setSmartMatches(matches);
       setCreateCravingOpen(false);
       setSmartMatchOpen(true);
     } else {
-      // No existing match -> create new pool directly
       createNewPoolDirectly(input);
     }
   };
@@ -302,6 +361,10 @@ export function App() {
       Healthy: FOOD_IMAGES.healthy,
     };
 
+    const newCreatedAt = Date.now();
+    const newExpiresAt = newCreatedAt + 20 * 60 * 1000; // 20 mins countdown
+    const tiers = generateDefaultTiers(input.target, input.restaurant);
+
     const newCraving: Craving = {
       id: Date.now(),
       restaurant: input.restaurant,
@@ -313,22 +376,27 @@ export function App() {
       timeWindow: input.timeWindow,
       count: 1,
       target: input.target,
-      deal: '20% OFF Campus Group Unlock + Free Add-on',
+      deal: 'Tier 3: 25% OFF Campus Group Unlock + Free Add-on',
       dealDiscount: 40,
       priceRange: `₹${input.budget - 30} - ₹${input.budget + 60}`,
       budgetPerPerson: input.budget,
       image: categoryImageMap[input.category] || FOOD_IMAGES.burger,
-      deadlineMinutes: 25,
+      deadlineMinutes: 20,
       status: 'ACTIVE',
+      tiers,
+      currentTierId: null,
+      createdAt: newCreatedAt,
+      expiresAt: newExpiresAt,
       joined: true,
       isUserCreated: true,
       participants: [
         {
-          id: 'user-aastha',
+          id: DEMO_USER_ID,
           name: 'Aastha Sharma (You)',
           initial: 'AS',
           avatarBg: 'bg-brand-500 text-white font-bold',
           role: 'Host',
+          joinedAt: newCreatedAt,
         },
       ],
       menu: [
@@ -358,7 +426,7 @@ export function App() {
   };
 
   const handleProceedToCheckout = (items: OrderItem[], itemTotal: number, discount: number) => {
-    setCheckoutData({ items, itemTotal, discount });
+    setCheckoutData({ items, itemTotal, discount, isRegularPriceFallback: false });
     setCurrentView('checkout');
   };
 
@@ -367,6 +435,24 @@ export function App() {
     setActiveOrder(order);
     setCurrentView('success');
     showToast('Your individual order has been registered!', 'Order Placed');
+  };
+
+  // Option B: Regular Price Fallback Checkout Handler
+  const handleRegularPriceFallbackOrder = (expiredCraving: Craving) => {
+    setExpiredModalOpen(false);
+    const defaultItem = expiredCraving.menu[0];
+    const items: OrderItem[] = [
+      { id: defaultItem.id, name: defaultItem.name, price: defaultItem.price, quantity: 1 },
+    ];
+    setCheckoutData({
+      items,
+      itemTotal: defaultItem.price,
+      discount: 0,
+      isRegularPriceFallback: true,
+    });
+    setActiveCravingId(expiredCraving.id);
+    setCurrentView('checkout');
+    showToast('Proceeding with regular price order (no collective discount applied).', undefined, 'info');
   };
 
   return (
@@ -447,10 +533,13 @@ export function App() {
                   <CravingCard
                     key={craving.id}
                     craving={craving}
+                    now={now}
                     onJoin={(id) => handleJoinCraving(id)}
                     onCardClick={(id) => {
                       setActiveCravingId(id);
-                      if (craving.status === 'DEAL_UNLOCKED' && craving.joined) {
+                      if (craving.status === 'EXPIRED') {
+                        setExpiredModalOpen(true);
+                      } else if (craving.status === 'UNLOCKED' && craving.joined) {
                         setCurrentView('deal');
                       } else {
                         setCurrentView('live');
@@ -539,13 +628,15 @@ export function App() {
         {currentView === 'live' && (
           <LiveCravingView
             craving={currentCraving}
+            now={now}
             onBack={() => setCurrentView('feed')}
-            onSimulateJoin={(id) => handleSimulateStudentJoin(id)}
+            onSimulateJoin={(id) => handleDemoSimulateCount(1)}
             onLeave={(id) => handleLeaveCraving(id)}
             onClaimDeal={(id) => {
               setActiveCravingId(id);
               setCurrentView('deal');
             }}
+            onOrderRegularPriceFallback={handleRegularPriceFallbackOrder}
           />
         )}
 
@@ -565,6 +656,7 @@ export function App() {
             items={checkoutData.items}
             itemTotal={checkoutData.itemTotal}
             discount={checkoutData.discount}
+            isRegularPriceFallback={checkoutData.isRegularPriceFallback}
             onBack={() => setCurrentView('deal')}
             onOrderPlaced={handleOrderConfirmed}
           />
@@ -586,7 +678,9 @@ export function App() {
             onSelectCraving={(id) => {
               setActiveCravingId(id);
               const target = cravings.find((c) => c.id === id);
-              if (target?.status === 'DEAL_UNLOCKED') {
+              if (target?.status === 'EXPIRED') {
+                setExpiredModalOpen(true);
+              } else if (target?.status === 'UNLOCKED') {
                 setCurrentView('deal');
               } else {
                 setCurrentView('live');
@@ -606,7 +700,7 @@ export function App() {
       </main>
 
       {/* Global Footer */}
-      <footer className="border-t border-stone-200 bg-white py-6 mt-12">
+      <footer className="border-t border-stone-200 bg-white py-6 mt-12 mb-16 md:mb-0">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-charcoal-500">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded-lg bg-brand-500 text-white font-extrabold flex items-center justify-center text-xs">
@@ -616,13 +710,13 @@ export function App() {
             <span>— Your campus. Your cravings. Better deals together.</span>
           </div>
           <div className="text-[11px] text-stone-400">
-            Prototype demo · Not affiliated with Swiggy · Pure client-side simulation
+            Phase 3 Live Deal Engine Active · Client-side prototype simulation
           </div>
         </div>
       </footer>
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-stone-200 px-4 py-2 flex items-center justify-around shadow-lg">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200 px-4 py-2 flex items-center justify-around shadow-lg">
         <button
           onClick={() => setCurrentView('feed')}
           className={`flex flex-col items-center gap-1 py-1 px-3 text-[10px] font-bold transition-colors ${
@@ -671,6 +765,18 @@ export function App() {
         </button>
       </nav>
 
+      {/* Judge Demo Mode Floating Controls Panel */}
+      <DemoControlPanel
+        activeCraving={currentCraving}
+        onSimulateCount={handleDemoSimulateCount}
+        onAdvanceTier={handleDemoAdvanceTier}
+        onForceUnlock={handleDemoForceUnlock}
+        onForceExpire={handleDemoForceExpire}
+        onReset={handleDemoResetCraving}
+        isDemoMode={isDemoMode}
+        onToggleDemoMode={() => setIsDemoMode(!isDemoMode)}
+      />
+
       {/* Campus Location Switcher Modal */}
       <CampusSelectorModal
         isOpen={campusModalOpen}
@@ -704,6 +810,19 @@ export function App() {
             createNewPoolDirectly(pendingCravingInput);
           }
         }}
+      />
+
+      {/* Deal Expired Failure Experience Modal */}
+      <DealExpiredModal
+        isOpen={expiredModalOpen}
+        onClose={() => setExpiredModalOpen(false)}
+        craving={currentCraving}
+        onFindAnother={() => {
+          setExpiredModalOpen(false);
+          setCurrentView('feed');
+        }}
+        onOrderRegularPrice={() => handleRegularPriceFallbackOrder(currentCraving)}
+        onLeaveCraving={() => handleLeaveCraving(currentCraving.id)}
       />
 
       {/* Toast Notification */}
