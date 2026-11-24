@@ -3,8 +3,8 @@ import { getCountdownStatus, CountdownResult } from '../engine/countdown';
 import { Craving } from '../types';
 
 /**
- * Custom hook to drive real second-by-second countdowns for active cravings.
- * Avoids interval drift by deriving remaining seconds from Date.now() wall-clock time.
+ * Custom hook to drive second-by-second countdowns for active cravings.
+ * Prevents duplicate expiration triggers using an internal processed set.
  */
 export function useDealTimer(
   cravings: Craving[],
@@ -14,20 +14,37 @@ export function useDealTimer(
   const onCravingExpiredRef = useRef(onCravingExpired);
   onCravingExpiredRef.current = onCravingExpired;
 
+  // Track cravings that have already had their expiration dispatched
+  const processedExpirationsRef = useRef<Set<number>>(new Set());
+
   useEffect(() => {
     const timer = setInterval(() => {
       const currentNow = Date.now();
       setNow(currentNow);
 
-      // Check if any active craving just crossed expiration
       cravings.forEach((c) => {
-        if (c.status === 'ACTIVE' && c.expiresAt && currentNow >= c.expiresAt) {
+        if (
+          c.status === 'ACTIVE' &&
+          c.expiresAt &&
+          currentNow >= c.expiresAt &&
+          !processedExpirationsRef.current.has(c.id)
+        ) {
+          processedExpirationsRef.current.add(c.id);
           onCravingExpiredRef.current?.(c.id);
         }
       });
     }, 1000);
 
     return () => clearInterval(timer);
+  }, [cravings]);
+
+  // Clean up processed set if a craving was reset back to active
+  useEffect(() => {
+    cravings.forEach((c) => {
+      if (c.status === 'ACTIVE' && c.expiresAt > Date.now()) {
+        processedExpirationsRef.current.delete(c.id);
+      }
+    });
   }, [cravings]);
 
   const getTimerForCraving = (expiresAt: number, status: string): CountdownResult => {

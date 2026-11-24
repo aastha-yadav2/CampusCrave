@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Zap, Sparkles, Utensils, ShieldCheck } from 'lucide-react';
 import { Craving, MenuItem, OrderItem } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { calculateOrderDiscount, calculateTierProgress } from '../engine/dealTiers';
 
 interface UnlockedDealViewProps {
   craving: Craving;
@@ -40,8 +41,9 @@ export const UnlockedDealView: React.FC<UnlockedDealViewProps> = ({
   });
 
   const itemTotal = selectedItems.reduce((acc, it) => acc + it.price * it.quantity, 0);
-  const discount = itemTotal > 0 ? craving.dealDiscount || 40 : 0;
+  const discount = itemTotal > 0 ? calculateOrderDiscount(craving, itemTotal) : 0;
   const finalTotal = Math.max(0, itemTotal - discount);
+  const tierProgress = calculateTierProgress(craving);
 
   return (
     <div className="max-w-2xl mx-auto space-y-6 pb-12 animate-fade-in">

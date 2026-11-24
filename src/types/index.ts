@@ -29,7 +29,8 @@ export interface DealTier {
   tierNumber: number;
   participantsRequired: number;
   rewardType: 'discount' | 'free_item' | 'cashback';
-  rewardValue: number; // e.g. 20 for 20%, 40 for ₹40 off
+  discountType?: 'percent' | 'fixed';
+  rewardValue: number; // e.g. 20 for 20%, or 50 for ₹50
   title: string;
   description: string;
 }
