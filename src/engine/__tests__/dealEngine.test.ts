@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { Craving, DealTier, Participant } from '../../types/index.ts';
@@ -11,6 +11,8 @@ import {
 import {
   calculateTierProgress,
   calculateOrderDiscount,
+  getAchievedReward,
+  getMinimumUnlockThreshold,
   generateDefaultTiers,
 } from '../dealTiers.ts';
 import {
@@ -22,12 +24,47 @@ import {
   forceInstantExpiration,
   evaluateCravingExpiry,
   DEMO_USER_ID,
+  DEMO_USER_NAME,
 } from '../dealEngine.ts';
 import {
   calculateRemainingSeconds,
   formatCountdown,
   getCountdownStatus,
 } from '../countdown.ts';
+import {
+  loadStoredCravings,
+  saveStoredCravings,
+  loadStoredOrders,
+  saveStoredOrders,
+  clearAndResetStorage,
+} from '../storage.ts';
+
+// Mock localStorage for Node.js test environment
+const memoryStore = new Map<string, string>();
+const mockLocalStorage = {
+  getItem(key: string): string | null {
+    return memoryStore.get(key) ?? null;
+  },
+  setItem(key: string, value: string): void {
+    memoryStore.set(key, String(value));
+  },
+  removeItem(key: string): void {
+    memoryStore.delete(key);
+  },
+  clear(): void {
+    memoryStore.clear();
+  },
+  key(index: number): string | null {
+    return Array.from(memoryStore.keys())[index] ?? null;
+  },
+  get length(): number {
+    return memoryStore.size;
+  },
+};
+
+if (typeof (globalThis as any).localStorage === 'undefined') {
+  (globalThis as any).localStorage = mockLocalStorage;
+}
 
 // Helper mock craving factory
 function createMockCraving(overrides?: Partial<Craving>): Craving {
@@ -59,9 +96,9 @@ function createMockCraving(overrides?: Partial<Craving>): Craving {
       participantsRequired: 8,
       rewardType: 'free_item',
       discountType: 'percent',
-      rewardValue: 25,
-      title: 'Tier 3: 25% OFF',
-      description: '25% discount at 8 students',
+      rewardValue: 0,
+      title: 'Tier 3: Free Sides Platter',
+      description: 'Free sides platter at 8 students',
     },
   ];
 
@@ -81,7 +118,7 @@ function createMockCraving(overrides?: Partial<Craving>): Craving {
     timeWindow: 'Tonight · 9:00 PM',
     count: participants.length,
     target: 8,
-    deal: 'Tier 3: 25% OFF',
+    deal: 'Tier 3: Free Sides Platter',
     dealDiscount: 0,
     priceRange: '₹150 - ₹250',
     budgetPerPerson: 180,
@@ -102,265 +139,524 @@ function createMockCraving(overrides?: Partial<Craving>): Craving {
   };
 }
 
-describe('Campus Crave — Engine Audit Test Suite', () => {
-  // Test 1: Join Active Pool
-  test('1. Student joins ACTIVE craving and updates count + collection parity', () => {
-    const craving = createMockCraving();
-    assert.equal(craving.count, 2);
-    assert.equal(craving.participants.length, 2);
-
-    const res = joinCravingPool(craving);
-    assert.equal(res.success, true);
-    assert.equal(res.craving.count, 3);
-    assert.equal(res.craving.participants.length, 3);
-    assert.equal(res.craving.joined, true);
-    assert.equal(res.craving.participants.some((p) => p.id === DEMO_USER_ID), true);
+describe('Campus Crave — Engine Audit & Phase 3.2 Hardening Suite', () => {
+  beforeEach(() => {
+    mockLocalStorage.clear();
   });
 
-  // Test 2: Duplicate Join Prevention
-  test('2. Duplicate join is prevented for the same user', () => {
-    const craving = createMockCraving();
-    const firstJoin = joinCravingPool(craving);
-    assert.equal(firstJoin.success, true);
+  // ==========================================
+  // SECTION 1: REWARD INTEGRITY & CALCULATIONS
+  // ==========================================
+  describe('1. Reward Integrity & Calculations', () => {
+    test('Unlocked deal with no achieved tier returns strictly 0 discount (no arbitrary 15% fallback)', () => {
+      // Pool unlocked at target 2, but tiers require 4, 6, 8
+      const craving = createMockCraving({
+        status: 'UNLOCKED',
+        count: 2,
+        target: 2,
+        tiers: [
+          {
+            id: 't-high',
+            tierNumber: 1,
+            participantsRequired: 4,
+            rewardType: 'discount',
+            discountType: 'percent',
+            rewardValue: 20,
+            title: 'Tier 1: 20% OFF',
+            description: 'Requires 4 students',
+          },
+        ],
+      });
 
-    // Attempt second join with same demo user
-    const secondJoin = joinCravingPool(firstJoin.craving);
-    assert.equal(secondJoin.success, false);
-    assert.match(secondJoin.message || '', /already joined/i);
-    assert.equal(secondJoin.craving.count, 3);
-  });
+      const discount = calculateOrderDiscount(craving, 200);
+      assert.equal(discount, 0, 'Must return strictly 0 discount when no tier is met');
 
-  // Test 3: Leave Active Pool
-  test('3. Student can leave ACTIVE craving and decrements count', () => {
-    const craving = createMockCraving();
-    const joined = joinCravingPool(craving).craving;
-    assert.equal(joined.count, 3);
-    assert.equal(joined.joined, true);
-
-    const left = leaveCravingPool(joined, DEMO_USER_ID);
-    assert.equal(left.success, true);
-    assert.equal(left.craving.count, 2);
-    assert.equal(left.craving.joined, false);
-    assert.equal(left.craving.participants.some((p) => p.id === DEMO_USER_ID), false);
-  });
-
-  // Test 4: Participant Count Integrity
-  test('4. Participant count strictly equals participants.length at all times', () => {
-    let craving = createMockCraving();
-    assert.equal(craving.count, craving.participants.length);
-
-    craving = joinCravingPool(craving).craving;
-    assert.equal(craving.count, craving.participants.length);
-
-    craving = simulateStudentsJoining(craving, 3).craving;
-    assert.equal(craving.count, craving.participants.length);
-
-    craving = leaveCravingPool(craving, DEMO_USER_ID).craving;
-    assert.equal(craving.count, craving.participants.length);
-  });
-
-  // Test 5: Tier Progression
-  test('5. Tier progression unlocks correct rewards as count increases', () => {
-    let craving = createMockCraving();
-    // At count 2: no tier (Tier 1 requires 3)
-    let progress = calculateTierProgress(craving);
-    assert.equal(progress.currentTier, null);
-    assert.equal(progress.nextTier?.id, 't-1');
-    assert.equal(progress.remainingToNextTier, 1);
-
-    // Add 1 participant -> reaches Tier 1 (3 participants)
-    craving = joinCravingPool(craving).craving;
-    progress = calculateTierProgress(craving);
-    assert.equal(progress.currentTier?.id, 't-1');
-    assert.equal(progress.nextTier?.id, 't-2');
-    assert.equal(progress.remainingToNextTier, 2);
-
-    // Add 2 participants -> reaches Tier 2 (5 participants)
-    craving = simulateStudentsJoining(craving, 2).craving;
-    progress = calculateTierProgress(craving);
-    assert.equal(progress.currentTier?.id, 't-2');
-    assert.equal(progress.nextTier?.id, 't-3');
-    assert.equal(progress.remainingToNextTier, 3);
-  });
-
-  // Test 6: Tier Downgrade after Leaving
-  test('6. Tier correctly downgrades if a participant leaves and drops below threshold', () => {
-    let craving = createMockCraving(); // count: 2
-    craving = joinCravingPool(craving).craving; // count: 3 (Tier 1 achieved)
-    assert.equal(craving.count, 3);
-    assert.equal(calculateTierProgress(craving).currentTier?.id, 't-1');
-
-    // User leaves -> count drops back to 2 (below Tier 1 threshold of 3)
-    craving = leaveCravingPool(craving, DEMO_USER_ID).craving;
-    assert.equal(craving.count, 2);
-    assert.equal(calculateTierProgress(craving).currentTier, null);
-  });
-
-  // Test 7: Unlock Conditions (Final Target reached)
-  test('7. Deal automatically unlocks when final target is reached', () => {
-    let craving = createMockCraving({ target: 4 }); // initial count 2
-    assert.equal(craving.status, 'ACTIVE');
-
-    craving = simulateStudentsJoining(craving, 2).craving; // count becomes 4/4
-    assert.equal(craving.count, 4);
-    assert.equal(craving.status, 'UNLOCKED');
-    assert.ok(craving.unlockedAt);
-  });
-
-  // Test 8: Expiration Without Meeting Target
-  test('8. Expiry without meeting minimum threshold transitions to EXPIRED', () => {
-    const pastTime = Date.now() - 5000;
-    // count 1, Tier 1 requires 3
-    const craving = createMockCraving({
-      count: 1,
-      participants: [{ id: 'p1', name: 'Host', initial: 'H', avatarBg: 'bg-stone-100' }],
-      expiresAt: pastTime,
-      status: 'ACTIVE',
+      const achieved = getAchievedReward(craving, 200);
+      assert.equal(achieved.discountAmount, 0);
+      assert.equal(achieved.currentTier, null);
     });
 
-    const res = evaluateCravingExpiry(craving, Date.now());
-    assert.equal(res.updated, true);
-    assert.equal(res.transition, 'EXPIRED');
-    assert.equal(res.craving.status, 'EXPIRED');
-  });
+    test('Percentage discount calculation is non-negative and capped at item total', () => {
+      const craving = createMockCraving({
+        count: 5, // Achieved Tier 2 (20% OFF)
+      });
 
-  // Test 9: Cannot Join Expired Pool
-  test('9. Joining an EXPIRED pool is rejected by state guards', () => {
-    const expiredCraving = createMockCraving({
-      status: 'EXPIRED',
-      expiresAt: Date.now() - 10000,
+      // 20% of 250 is 50
+      assert.equal(calculateOrderDiscount(craving, 250), 50);
+
+      // Total 0 returns 0
+      assert.equal(calculateOrderDiscount(craving, 0), 0);
+
+      // Negative total returns 0
+      assert.equal(calculateOrderDiscount(craving, -50), 0);
+
+      // Tier with 150% discount capped at itemTotal
+      const overTierCraving = createMockCraving({
+        count: 3,
+        tiers: [
+          {
+            id: 't-over',
+            tierNumber: 1,
+            participantsRequired: 3,
+            rewardType: 'discount',
+            discountType: 'percent',
+            rewardValue: 150,
+            title: 'Super discount',
+            description: '150% off',
+          },
+        ],
+      });
+      assert.equal(calculateOrderDiscount(overTierCraving, 100), 100);
     });
 
-    const guardCheck = canJoinDeal(expiredCraving);
-    assert.equal(guardCheck.allowed, false);
+    test('Fixed discount calculation is capped at item total', () => {
+      const fixedCraving = createMockCraving({
+        count: 3,
+        tiers: [
+          {
+            id: 'fix-1',
+            tierNumber: 1,
+            participantsRequired: 3,
+            rewardType: 'discount',
+            discountType: 'fixed',
+            rewardValue: 80,
+            title: 'Tier 1: ₹80 OFF',
+            description: 'Flat ₹80 off',
+          },
+        ],
+      });
 
-    const res = joinCravingPool(expiredCraving);
-    assert.equal(res.success, false);
-    assert.match(res.message || '', /expired/i);
-  });
+      // Order total ₹200 -> discount ₹80
+      assert.equal(calculateOrderDiscount(fixedCraving, 200), 80);
 
-  // Test 10: Cannot Expire Unlocked Deal & Valid State Transitions
-  test('10. UNLOCKED deals can never expire and transitions are strictly guarded', () => {
-    const unlockedCraving = createMockCraving({
-      status: 'UNLOCKED',
-      count: 8,
-      unlockedAt: Date.now() - 60000,
-      expiresAt: Date.now() - 1000, // even if past timestamp
+      // Order total ₹50 -> discount capped at ₹50 (cannot exceed subtotal)
+      assert.equal(calculateOrderDiscount(fixedCraving, 50), 50);
     });
 
-    // Expiry check must reject expiring an unlocked deal
-    const expiryRes = evaluateCravingExpiry(unlockedCraving, Date.now());
-    assert.equal(expiryRes.updated, false);
-    assert.equal(expiryRes.craving.status, 'UNLOCKED');
+    test('Free-item reward provides 0 monetary discount and returns complimentary description', () => {
+      const freeItemCraving = createMockCraving({
+        count: 8, // Achieved Tier 3 (Free Sides Platter, rewardType: free_item)
+      });
 
-    // Force expire action must also reject
-    const forceRes = forceInstantExpiration(unlockedCraving);
-    assert.equal(forceRes.success, false);
-    assert.equal(forceRes.craving.status, 'UNLOCKED');
+      // Strict rule: Free-item reward gives 0 monetary discount on food subtotal
+      const discount = calculateOrderDiscount(freeItemCraving, 200);
+      assert.equal(discount, 0);
 
-    // Check invalid state transition from UNLOCKED -> EXPIRED
-    assert.equal(isValidTransition('UNLOCKED', 'EXPIRED'), false);
-    assert.equal(isValidTransition('EXPIRED', 'UNLOCKED'), false);
-    assert.equal(isValidTransition('CANCELLED', 'ACTIVE'), false);
-  });
-
-  // Test 11: Demo Controls (+1, +3, +5, Next Tier, Instant Unlock, Force Expire)
-  test('11. Demo controls advance states safely without exceeding targets', () => {
-    let craving = createMockCraving({ target: 6, count: 2 });
-
-    // +1
-    let res = simulateStudentsJoining(craving, 1);
-    assert.equal(res.success, true);
-    assert.equal(res.craving.count, 3);
-
-    // Next Tier (from 3 to next tier at 5)
-    res = advanceToNextTier(res.craving);
-    assert.equal(res.success, true);
-    assert.equal(res.craving.count, 5);
-
-    // Instant Unlock (fills up to 6 and unlocks)
-    res = forceInstantUnlock(res.craving);
-    assert.equal(res.success, true);
-    assert.equal(res.craving.count, 6);
-    assert.equal(res.craving.status, 'UNLOCKED');
-
-    // Force expire on unlocked is rejected
-    const badExpire = forceInstantExpiration(res.craving);
-    assert.equal(badExpire.success, false);
-  });
-
-  // Test 12: Checkout Discount Integrity
-  test('12. Checkout calculation exactly matches achieved tier without arbitrary offsets', () => {
-    const craving = createMockCraving({
-      count: 5, // Tier 2 achieved (20% OFF)
+      const reward = getAchievedReward(freeItemCraving, 200);
+      assert.equal(reward.rewardType, 'free_item');
+      assert.equal(reward.discountAmount, 0);
+      assert.equal(reward.freeItemDescription, 'Tier 3: Free Sides Platter');
     });
 
-    // Cart total: ₹200
-    // At Tier 2 (20%), discount must be exactly 20% of 200 = ₹40
-    const discount = calculateOrderDiscount(craving, 200);
-    assert.equal(discount, 40);
+    test('Expired and cancelled deals return 0 discount at checkout', () => {
+      const expiredCraving = createMockCraving({
+        count: 5,
+        status: 'EXPIRED',
+      });
+      assert.equal(calculateOrderDiscount(expiredCraving, 200), 0);
 
-    // Cart total: ₹350
-    // 20% of 350 = ₹70
-    assert.equal(calculateOrderDiscount(craving, 350), 70);
+      const rewardExpired = getAchievedReward(expiredCraving, 200);
+      assert.equal(rewardExpired.discountAmount, 0);
+      assert.equal(rewardExpired.rewardType, 'none');
 
-    // Fixed discount tier test
-    const fixedCraving = createMockCraving({
-      count: 4,
-      tiers: [
+      const cancelledCraving = createMockCraving({
+        count: 5,
+        status: 'CANCELLED',
+      });
+      assert.equal(calculateOrderDiscount(cancelledCraving, 200), 0);
+    });
+
+    test('Single source of truth: getAchievedReward and calculateOrderDiscount agree', () => {
+      const craving = createMockCraving({ count: 5 }); // Tier 2 (20% OFF)
+      const orderTotal = 300;
+
+      const directDiscount = calculateOrderDiscount(craving, orderTotal);
+      const achieved = getAchievedReward(craving, orderTotal);
+
+      assert.equal(directDiscount, 60);
+      assert.equal(achieved.discountAmount, directDiscount);
+      assert.equal(achieved.currentTier?.id, 't-2');
+    });
+
+    test('Backwards compatibility for legacy tiers without explicit discountType', () => {
+      const legacyCraving = createMockCraving({
+        count: 4,
+        tiers: [
+          {
+            id: 'legacy-1',
+            tierNumber: 1,
+            participantsRequired: 4,
+            rewardType: 'discount',
+            rewardValue: 25, // percentage without discountType specified
+            title: 'Legacy 25% Off',
+            description: '25% off meal',
+          } as DealTier,
+        ],
+      });
+
+      // 25% of 200 = 50
+      assert.equal(calculateOrderDiscount(legacyCraving, 200), 50);
+    });
+  });
+
+  // ==========================================
+  // SECTION 2: UNLOCK AND EXPIRY RULES
+  // ==========================================
+  describe('2. Unlock and Expiry Rules', () => {
+    test('getMinimumUnlockThreshold returns lowest tier requirement or target', () => {
+      const craving = createMockCraving();
+      assert.equal(getMinimumUnlockThreshold(craving), 3); // Tier 1 requires 3
+
+      const noTierCraving = createMockCraving({ tiers: [], target: 10 });
+      assert.equal(getMinimumUnlockThreshold(noTierCraving), 10);
+    });
+
+    test('Deal reaching final target transitions to UNLOCKED without altering original expiresAt', () => {
+      const expiresAt = Date.now() + 600000;
+      let craving = createMockCraving({ target: 3, count: 2, expiresAt });
+
+      const res = joinCravingPool(craving);
+      assert.equal(res.success, true);
+      assert.equal(res.craving.count, 3);
+      assert.equal(res.craving.status, 'UNLOCKED');
+      assert.ok(res.craving.unlockedAt);
+      assert.equal(res.craving.expiresAt, expiresAt, 'Must not extend expiry timestamp');
+    });
+
+    test('Active deal expiring with count >= minimum threshold transitions to UNLOCKED', () => {
+      const pastTime = Date.now() - 1000;
+      // count is 3, which equals Tier 1 minimum threshold of 3, but target is 8
+      const craving = createMockCraving({
+        count: 3,
+        participants: [
+          { id: 'p1', name: 'U1', initial: '1', avatarBg: 'bg-stone-100' },
+          { id: 'p2', name: 'U2', initial: '2', avatarBg: 'bg-stone-100' },
+          { id: 'p3', name: 'U3', initial: '3', avatarBg: 'bg-stone-100' },
+        ],
+        target: 8,
+        expiresAt: pastTime,
+        status: 'ACTIVE',
+      });
+
+      const res = evaluateCravingExpiry(craving, Date.now());
+      assert.equal(res.updated, true);
+      assert.equal(res.transition, 'UNLOCKED');
+      assert.equal(res.craving.status, 'UNLOCKED');
+      assert.equal(res.craving.currentTierId, 't-1');
+    });
+
+    test('Active deal expiring with count < minimum threshold transitions to EXPIRED', () => {
+      const pastTime = Date.now() - 1000;
+      // count is 2, Tier 1 minimum threshold is 3
+      const craving = createMockCraving({
+        count: 2,
+        expiresAt: pastTime,
+        status: 'ACTIVE',
+      });
+
+      const res = evaluateCravingExpiry(craving, Date.now());
+      assert.equal(res.updated, true);
+      assert.equal(res.transition, 'EXPIRED');
+      assert.equal(res.craving.status, 'EXPIRED');
+    });
+
+    test('Terminal states (UNLOCKED, EXPIRED, CANCELLED) remain terminal and reject repeat evaluation', () => {
+      const now = Date.now();
+
+      // UNLOCKED terminal check
+      const unlockedCraving = createMockCraving({
+        status: 'UNLOCKED',
+        expiresAt: now - 5000,
+      });
+      const evalUnlocked = evaluateCravingExpiry(unlockedCraving, now);
+      assert.equal(evalUnlocked.updated, false);
+      assert.equal(evalUnlocked.craving.status, 'UNLOCKED');
+
+      // EXPIRED terminal check
+      const expiredCraving = createMockCraving({
+        status: 'EXPIRED',
+        expiresAt: now - 5000,
+      });
+      const evalExpired = evaluateCravingExpiry(expiredCraving, now);
+      assert.equal(evalExpired.updated, false);
+      assert.equal(evalExpired.craving.status, 'EXPIRED');
+
+      // CANCELLED terminal check
+      const cancelledCraving = createMockCraving({
+        status: 'CANCELLED',
+        expiresAt: now - 5000,
+      });
+      const evalCancelled = evaluateCravingExpiry(cancelledCraving, now);
+      assert.equal(evalCancelled.updated, false);
+      assert.equal(evalCancelled.craving.status, 'CANCELLED');
+    });
+
+    test('State transition guards prevent illegal transitions', () => {
+      assert.equal(isValidTransition('UNLOCKED', 'ACTIVE'), false);
+      assert.equal(isValidTransition('UNLOCKED', 'EXPIRED'), false);
+      assert.equal(isValidTransition('EXPIRED', 'ACTIVE'), false);
+      assert.equal(isValidTransition('EXPIRED', 'UNLOCKED'), false);
+      assert.equal(isValidTransition('CANCELLED', 'ACTIVE'), false);
+      assert.equal(isValidTransition('CANCELLED', 'UNLOCKED'), false);
+      assert.equal(isValidTransition('ACTIVE', 'LOCKING'), true);
+      assert.equal(isValidTransition('ACTIVE', 'CANCELLED'), true);
+      assert.equal(isValidTransition('LOCKING', 'UNLOCKED'), true);
+      assert.equal(isValidTransition('LOCKING', 'EXPIRED'), true);
+
+      // transitionCraving properly routes ACTIVE -> UNLOCKED through LOCKING
+      const active = createMockCraving({ status: 'ACTIVE' });
+      const transition = transitionCraving(active, 'UNLOCKED');
+      assert.equal(transition.success, true);
+      assert.equal(transition.craving.status, 'UNLOCKED');
+      assert.ok(transition.craving.lockedAt);
+      assert.ok(transition.craving.unlockedAt);
+    });
+  });
+
+  // ==========================================
+  // SECTION 3: DEMO CONTROLS & PARTICIPANT PARITY
+  // ==========================================
+  describe('3. Demo Controls & Participant Parity', () => {
+    test('Demo actions (+1, +3, next tier, force unlock, force expire) succeed on ACTIVE pools', () => {
+      let craving = createMockCraving({ target: 6, count: 2 });
+
+      // +1
+      let res = simulateStudentsJoining(craving, 1);
+      assert.equal(res.success, true);
+      assert.equal(res.craving.count, 3);
+      assert.equal(res.craving.count, res.craving.participants.length);
+
+      // Next tier (target 5)
+      res = advanceToNextTier(res.craving);
+      assert.equal(res.success, true);
+      assert.equal(res.craving.count, 5);
+      assert.equal(res.craving.count, res.craving.participants.length);
+
+      // Force Instant Unlock (fills to 6 and unlocks)
+      res = forceInstantUnlock(res.craving);
+      assert.equal(res.success, true);
+      assert.equal(res.craving.count, 6);
+      assert.equal(res.craving.status, 'UNLOCKED');
+      assert.equal(res.craving.count, res.craving.participants.length);
+
+      // Force instant expire on fresh active craving
+      const freshActive = createMockCraving({ status: 'ACTIVE' });
+      const expRes = forceInstantExpiration(freshActive);
+      assert.equal(expRes.success, true);
+      assert.equal(expRes.craving.status, 'EXPIRED');
+    });
+
+    test('forceInstantUnlock is rejected on LOCKING, EXPIRED, CANCELLED, and UNLOCKED states', () => {
+      const locking = createMockCraving({ status: 'LOCKING' });
+      const resLocking = forceInstantUnlock(locking);
+      assert.equal(resLocking.success, false);
+      assert.equal(resLocking.craving, locking);
+
+      const expired = createMockCraving({ status: 'EXPIRED' });
+      const resExpired = forceInstantUnlock(expired);
+      assert.equal(resExpired.success, false);
+      assert.equal(resExpired.craving, expired);
+
+      const cancelled = createMockCraving({ status: 'CANCELLED' });
+      const resCancelled = forceInstantUnlock(cancelled);
+      assert.equal(resCancelled.success, false);
+      assert.equal(resCancelled.craving, cancelled);
+
+      const unlocked = createMockCraving({ status: 'UNLOCKED' });
+      const resUnlocked = forceInstantUnlock(unlocked);
+      assert.equal(resUnlocked.success, false);
+      assert.equal(resUnlocked.craving, unlocked);
+    });
+
+    test('forceInstantExpiration is rejected on LOCKING, EXPIRED, CANCELLED, and UNLOCKED states', () => {
+      const locking = createMockCraving({ status: 'LOCKING' });
+      const resLocking = forceInstantExpiration(locking);
+      assert.equal(resLocking.success, false);
+      assert.equal(resLocking.craving, locking);
+
+      const expired = createMockCraving({ status: 'EXPIRED' });
+      const resExpired = forceInstantExpiration(expired);
+      assert.equal(resExpired.success, false);
+      assert.equal(resExpired.craving, expired);
+
+      const cancelled = createMockCraving({ status: 'CANCELLED' });
+      const resCancelled = forceInstantExpiration(cancelled);
+      assert.equal(resCancelled.success, false);
+      assert.equal(resCancelled.craving, cancelled);
+
+      const unlocked = createMockCraving({ status: 'UNLOCKED' });
+      const resUnlocked = forceInstantExpiration(unlocked);
+      assert.equal(resUnlocked.success, false);
+      assert.equal(resUnlocked.craving, unlocked);
+    });
+
+    test('Duplicate participant joins are strictly prevented', () => {
+      const craving = createMockCraving();
+      const firstJoin = joinCravingPool(craving);
+      assert.equal(firstJoin.success, true);
+
+      // Second join with same user ID
+      const secondJoin = joinCravingPool(firstJoin.craving);
+      assert.equal(secondJoin.success, false);
+      assert.match(secondJoin.message || '', /already joined/i);
+      assert.equal(secondJoin.craving.count, firstJoin.craving.count);
+    });
+
+    test('Participant count strictly equals participants.length across all actions', () => {
+      let craving = createMockCraving();
+      assert.equal(craving.count, craving.participants.length);
+
+      craving = joinCravingPool(craving).craving;
+      assert.equal(craving.count, craving.participants.length);
+
+      craving = simulateStudentsJoining(craving, 3).craving;
+      assert.equal(craving.count, craving.participants.length);
+
+      craving = leaveCravingPool(craving, DEMO_USER_ID).craving;
+      assert.equal(craving.count, craving.participants.length);
+    });
+
+    test('Leaving pool correctly updates participants and downgrades achieved tier', () => {
+      let craving = createMockCraving({ count: 2 });
+      craving = joinCravingPool(craving).craving; // count 3 -> Tier 1 achieved
+      assert.equal(craving.count, 3);
+      assert.equal(calculateTierProgress(craving).currentTier?.id, 't-1');
+
+      // Leave -> count drops to 2 (below Tier 1 requirement)
+      craving = leaveCravingPool(craving, DEMO_USER_ID).craving;
+      assert.equal(craving.count, 2);
+      assert.equal(craving.count, craving.participants.length);
+      assert.equal(calculateTierProgress(craving).currentTier, null);
+    });
+  });
+
+  // ==========================================
+  // SECTION 4: COUNTDOWN & TIMERS
+  // ==========================================
+  describe('4. Countdown & Timers', () => {
+    test('Countdown math does not drift or become negative', () => {
+      const baseNow = 1700000000000;
+      const expiresAt = baseNow + 125 * 1000; // 2m 05s
+
+      const status = getCountdownStatus(expiresAt, baseNow);
+      assert.equal(status.remainingSeconds, 125);
+      assert.equal(status.formatted, '02:05');
+      assert.equal(status.isExpired, false);
+      assert.equal(status.isUrgent, false);
+
+      // Urgent (< 2 mins)
+      const urgentStatus = getCountdownStatus(baseNow + 90 * 1000, baseNow);
+      assert.equal(urgentStatus.isUrgent, true);
+
+      // Past expiry
+      const pastStatus = getCountdownStatus(expiresAt, baseNow + 130 * 1000);
+      assert.equal(pastStatus.remainingSeconds, 0);
+      assert.equal(pastStatus.formatted, '00:00');
+      assert.equal(pastStatus.isExpired, true);
+    });
+
+    test('formatCountdown formats mm:ss accurately', () => {
+      assert.equal(formatCountdown(0), '00:00');
+      assert.equal(formatCountdown(-10), '00:00');
+      assert.equal(formatCountdown(59), '00:59');
+      assert.equal(formatCountdown(60), '01:00');
+      assert.equal(formatCountdown(605), '10:05');
+    });
+  });
+
+  // ==========================================
+  // SECTION 5: STORAGE PERSISTENCE & AUTO-REPAIR
+  // ==========================================
+  describe('5. Storage Persistence & Auto-Repair', () => {
+    test('Valid cravings array persists and reloads accurately', () => {
+      const mockList = [createMockCraving({ id: 991, restaurant: 'Campus Biryani' })];
+      saveStoredCravings(mockList);
+
+      const loaded = loadStoredCravings();
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].id, 991);
+      assert.equal(loaded[0].restaurant, 'Campus Biryani');
+    });
+
+    test('Corrupted count parity is automatically repaired to participants.length on load', () => {
+      const corruptedItem = createMockCraving({
+        id: 992,
+        count: 777, // Corrupted count
+        participants: [
+          { id: 'p1', name: 'U1', initial: '1', avatarBg: 'bg-stone-100' },
+          { id: 'p2', name: 'U2', initial: '2', avatarBg: 'bg-stone-100' },
+        ],
+      });
+      mockLocalStorage.setItem('campus_crave_live_cravings_v3', JSON.stringify([corruptedItem]));
+
+      const loaded = loadStoredCravings();
+      assert.equal(loaded[0].count, 2, 'Corrupted count must be repaired to participants.length');
+      assert.equal(loaded[0].count, loaded[0].participants.length);
+    });
+
+    test('Malformed JSON gracefully falls back to initial cravings without throwing', () => {
+      mockLocalStorage.setItem('campus_crave_live_cravings_v3', '{ invalid_json ::: broken');
+
+      const loaded = loadStoredCravings();
+      assert.ok(Array.isArray(loaded));
+      assert.ok(loaded.length > 0, 'Falls back safely to initial cravings');
+    });
+
+    test('Invalid object shapes are ignored and filtered out', () => {
+      const corruptData = [
+        { invalid: 'random object' },
+        null,
+        12345,
+        createMockCraving({ id: 993, restaurant: 'Valid Joint' }),
+      ];
+      mockLocalStorage.setItem('campus_crave_live_cravings_v3', JSON.stringify(corruptData));
+
+      const loaded = loadStoredCravings();
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0].id, 993);
+      assert.equal(loaded[0].restaurant, 'Valid Joint');
+    });
+
+    test('Expired active timestamps are automatically evaluated and updated upon load', () => {
+      const expiredItem = createMockCraving({
+        id: 994,
+        status: 'ACTIVE',
+        expiresAt: Date.now() - 10000, // Passed timestamp
+        count: 1, // Below minimum threshold
+        participants: [{ id: 'p1', name: 'U1', initial: '1', avatarBg: 'bg-stone-100' }],
+      });
+      mockLocalStorage.setItem('campus_crave_live_cravings_v3', JSON.stringify([expiredItem]));
+
+      const loaded = loadStoredCravings();
+      assert.equal(loaded[0].status, 'EXPIRED', 'Must be evaluated to EXPIRED on load');
+    });
+
+    test('clearAndResetStorage cleans keys and restores INITIAL_CRAVINGS', () => {
+      saveStoredCravings([createMockCraving({ id: 995 })]);
+      saveStoredOrders([
         {
-          id: 'fix-1',
-          tierNumber: 1,
-          participantsRequired: 4,
-          rewardType: 'discount',
-          discountType: 'fixed',
-          rewardValue: 60,
-          title: 'Tier 1: ₹60 OFF',
-          description: 'Flat ₹60 off',
+          orderId: 'CC-123456',
+          cravingId: 995,
+          restaurant: 'Test',
+          zone: 'Hostel',
+          items: [],
+          itemTotal: 100,
+          dealDiscount: 20,
+          finalTotal: 80,
+          isRegularPriceFallback: false,
+          placedAt: 'Now',
+          estimatedDelivery: '30m',
+          status: 'ORDER_PLACED',
         },
-      ],
+      ]);
+
+      assert.ok(mockLocalStorage.getItem('campus_crave_live_cravings_v3'));
+      assert.ok(mockLocalStorage.getItem('campus_crave_placed_orders_v3'));
+
+      const reset = clearAndResetStorage();
+      assert.ok(Array.isArray(reset));
+      assert.equal(mockLocalStorage.getItem('campus_crave_live_cravings_v3'), null);
+      assert.equal(mockLocalStorage.getItem('campus_crave_placed_orders_v3'), null);
     });
-    assert.equal(calculateOrderDiscount(fixedCraving, 250), 60);
-
-    // Expired craving has 0 discount
-    const expired = { ...craving, status: 'EXPIRED' as const };
-    assert.equal(calculateOrderDiscount(expired, 200), 0);
-  });
-
-  // Test 13: Countdown Math & Formatting
-  test('13. Countdown math does not drift or become negative', () => {
-    const baseNow = 1700000000000;
-    const expiresAt = baseNow + 125 * 1000; // 2 minutes 5 seconds
-
-    const status = getCountdownStatus(expiresAt, baseNow);
-    assert.equal(status.remainingSeconds, 125);
-    assert.equal(status.formatted, '02:05');
-    assert.equal(status.isExpired, false);
-
-    // Past expiry
-    const pastStatus = getCountdownStatus(expiresAt, baseNow + 130 * 1000);
-    assert.equal(pastStatus.remainingSeconds, 0);
-    assert.equal(pastStatus.formatted, '00:00');
-    assert.equal(pastStatus.isExpired, true);
-  });
-
-  // Test 14: Data Validation and Parity Repair
-  test('14. Corrupted count is auto-repaired to match participants.length', () => {
-    // Simulate corrupted record where count was set to 999 but participants has 2 items
-    const corruptedRecord = createMockCraving({
-      count: 999,
-      participants: [
-        { id: 'p1', name: 'User 1', initial: 'U1', avatarBg: 'bg-stone-100' },
-        { id: 'p2', name: 'User 2', initial: 'U2', avatarBg: 'bg-stone-100' },
-      ],
-    });
-
-    // Enforce repair
-    const repaired = {
-      ...corruptedRecord,
-      count: corruptedRecord.participants.length,
-    };
-    assert.equal(repaired.count, 2);
-    assert.equal(repaired.count, repaired.participants.length);
   });
 });

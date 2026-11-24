@@ -1,6 +1,19 @@
 import type { Craving, DealTier, TierProgressSummary } from '../types/index.ts';
 
 /**
+ * Defines and documents the exact minimum participation threshold required to unlock a pool.
+ * A pool unlocks upon window expiry if and only if count >= minimum unlock threshold.
+ * Default is Tier 1 requirement (first milestone). If no tiers, defaults to final target.
+ */
+export function getMinimumUnlockThreshold(craving: Craving): number {
+  if (craving.tiers && craving.tiers.length > 0) {
+    const sorted = [...craving.tiers].sort((a, b) => a.participantsRequired - b.participantsRequired);
+    return sorted[0].participantsRequired;
+  }
+  return craving.target;
+}
+
+/**
  * Calculates progressive tier information for any craving.
  * Identifies:
  * - Current highest tier unlocked
@@ -63,10 +76,51 @@ export function calculateTierProgress(craving: Craving): TierProgressSummary {
   };
 }
 
+export interface AchievedRewardDetails {
+  currentTier: DealTier | null;
+  rewardType: 'discount' | 'free_item' | 'cashback' | 'none';
+  discountAmount: number;
+  freeItemDescription: string | null;
+  summaryTitle: string;
+}
+
 /**
- * Calculates the exact rupee discount for an order based on current pool tier.
- * Completely eliminates arbitrary additions like `+15` or `+20`.
- * Single source of truth for all checkout calculations.
+ * Resolves detailed reward information for deal cards, modals, and checkout.
+ */
+export function getAchievedReward(craving: Craving, itemTotal: number = 0): AchievedRewardDetails {
+  const progress = calculateTierProgress(craving);
+  const tier = progress.currentTier;
+
+  if (!tier || craving.status === 'EXPIRED' || craving.status === 'CANCELLED') {
+    return {
+      currentTier: null,
+      rewardType: 'none',
+      discountAmount: 0,
+      freeItemDescription: null,
+      summaryTitle: craving.deal,
+    };
+  }
+
+  const discountAmount = calculateOrderDiscount(craving, itemTotal);
+  const freeItemDescription = tier.rewardType === 'free_item' ? tier.title : null;
+
+  return {
+    currentTier: tier,
+    rewardType: tier.rewardType,
+    discountAmount,
+    freeItemDescription,
+    summaryTitle: tier.title,
+  };
+}
+
+/**
+ * Calculates the exact monetary discount for an order based on current pool tier.
+ * Strict rules:
+ * - If no eligible tier is unlocked, monetary discount is strictly 0 (no arbitrary 15% fallback).
+ * - If tier rewardType is 'free_item', monetary discount is 0 (free item is separate).
+ * - If tier rewardType is 'discount' with 'percent', computes Math.round(itemTotal * (tier.rewardValue / 100)).
+ * - If tier rewardType is 'discount' with 'fixed', uses Math.min(itemTotal, tier.rewardValue).
+ * - Capped between 0 and itemTotal at all times.
  */
 export function calculateOrderDiscount(craving: Craving, itemTotal: number): number {
   if (itemTotal <= 0) return 0;
@@ -75,29 +129,33 @@ export function calculateOrderDiscount(craving: Craving, itemTotal: number): num
   const progress = calculateTierProgress(craving);
   const tier = progress.currentTier;
 
-  // If no tier is unlocked yet, but craving is UNLOCKED (e.g. at target), use first tier or default 15%
+  // Strict Rule: No eligible discount tier means zero monetary discount.
   if (!tier) {
-    if (craving.status === 'UNLOCKED') {
-      return Math.round(itemTotal * 0.15);
-    }
     return 0;
   }
 
-  // Detect discount type (explicit or from title/value)
-  const isFixed = tier.discountType === 'fixed' || tier.title.includes('₹');
-  const isPercent = tier.discountType === 'percent' || tier.title.includes('%') || tier.rewardValue <= 50;
-
-  if (isFixed && !tier.title.includes('%')) {
-    return Math.min(itemTotal, tier.rewardValue);
+  // Strict Rule: Free-item rewards provide zero monetary discount on subtotal.
+  if (tier.rewardType === 'free_item') {
+    return 0;
   }
 
-  if (isPercent) {
-    const percentage = tier.rewardValue;
-    return Math.round(itemTotal * (percentage / 100));
+  // Explicit structured discountType evaluation
+  if (tier.discountType === 'fixed') {
+    return Math.min(itemTotal, Math.max(0, tier.rewardValue));
   }
 
-  // Fallback to tier value capped at item total
-  return Math.min(itemTotal, tier.rewardValue);
+  if (tier.discountType === 'percent') {
+    const rawDiscount = Math.round(itemTotal * (tier.rewardValue / 100));
+    return Math.min(itemTotal, Math.max(0, rawDiscount));
+  }
+
+  // Backwards compatibility for tiers where discountType was omitted
+  if (tier.rewardValue <= 50) {
+    const rawDiscount = Math.round(itemTotal * (tier.rewardValue / 100));
+    return Math.min(itemTotal, Math.max(0, rawDiscount));
+  }
+
+  return Math.min(itemTotal, Math.max(0, tier.rewardValue));
 }
 
 /**
@@ -136,9 +194,9 @@ export function generateDefaultTiers(target: number, restaurantName: string): De
       participantsRequired: tier3Req,
       rewardType: 'free_item',
       discountType: 'percent',
-      rewardValue: 25,
-      title: 'Tier 3: 25% OFF + Free Sides Combo',
-      description: `Full unlock: 25% discount and complimentary sides platter`,
+      rewardValue: 0, // Free item has 0 monetary discount
+      title: 'Tier 3: Free Sides Platter Unlocked',
+      description: `Full unlock: complimentary sides platter for every participant`,
     },
   ];
 }

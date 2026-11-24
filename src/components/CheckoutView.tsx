@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Craving, OrderItem, PlacedOrder } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { getAchievedReward } from '../engine/dealTiers';
 
 interface CheckoutViewProps {
   craving: Craving;
@@ -34,6 +35,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
   const appliedDiscount = isRegularPriceFallback ? 0 : discount;
   const finalTotal = Math.max(0, itemTotal - appliedDiscount);
+  const achievedReward = getAchievedReward(craving, itemTotal);
 
   const handlePlaceOrder = () => {
     setIsSubmitting(true);
@@ -177,10 +179,19 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             <span>Item Total</span>
             <span className="font-semibold">{formatCurrency(itemTotal)}</span>
           </div>
-          {!isRegularPriceFallback && (
+          {!isRegularPriceFallback && appliedDiscount > 0 && (
             <div className="flex items-center justify-between text-xs text-emerald-600 font-bold">
               <span>Campus Crave Pool Savings</span>
               <span>- {formatCurrency(appliedDiscount)}</span>
+            </div>
+          )}
+          {!isRegularPriceFallback && achievedReward.freeItemDescription && (
+            <div className="flex items-center justify-between text-xs text-brand-600 font-bold bg-brand-50/70 p-2.5 rounded-xl border border-brand-200">
+              <span className="flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-brand-500" />
+                <span>Complimentary Pool Reward</span>
+              </span>
+              <span>{achievedReward.freeItemDescription} (FREE)</span>
             </div>
           )}
           <div className="flex items-center justify-between text-xs text-charcoal-500">

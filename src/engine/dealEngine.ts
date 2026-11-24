@@ -1,6 +1,10 @@
 import type { Craving, Participant } from '../types/index.ts';
 import { canJoinDeal, canLeaveDeal, transitionCraving } from './dealLifecycle.ts';
-import { calculateTierProgress, calculateOrderDiscount } from './dealTiers.ts';
+import {
+  calculateTierProgress,
+  calculateOrderDiscount,
+  getMinimumUnlockThreshold,
+} from './dealTiers.ts';
 
 export interface DealEngineResult {
   craving: Craving;
@@ -16,7 +20,7 @@ export const DEMO_USER_NAME = 'Aastha Sharma (You)';
  * Checks and updates a craving's lifecycle state based on wall-clock time.
  * If active time expires:
  * 1. Enters LOCKING
- * 2. Evaluates if minimum tier or target reached
+ * 2. Evaluates if minimum unlock threshold is met
  * 3. Transitions to UNLOCKED or EXPIRED
  */
 export function evaluateCravingExpiry(craving: Craving, now: number = Date.now()): {
@@ -35,16 +39,16 @@ export function evaluateCravingExpiry(craving: Craving, now: number = Date.now()
   }
 
   // Window closed! Transition through centralized state machine
-  const tierProgress = calculateTierProgress(craving);
-  const minRequired = craving.tiers[0]?.participantsRequired || craving.target;
-  const reachedMinTier = tierProgress.unlockedTiersCount > 0 || craving.count >= minRequired;
+  const minRequired = getMinimumUnlockThreshold(craving);
+  const reachedMinThreshold = craving.count >= minRequired;
 
-  if (reachedMinTier) {
+  if (reachedMinThreshold) {
     const trans = transitionCraving(craving, 'UNLOCKED', { now });
     if (trans.success) {
+      const tierProgress = calculateTierProgress(trans.craving);
       const updated: Craving = {
         ...trans.craving,
-        currentTierId: tierProgress.currentTier?.id || craving.tiers[0]?.id || null,
+        currentTierId: tierProgress.currentTier?.id || null,
         dealDiscount: calculateOrderDiscount(trans.craving, craving.budgetPerPerson),
       };
       return { updated: true, craving: updated, transition: 'UNLOCKED' };
@@ -87,7 +91,6 @@ export function joinCravingPool(
   const newParticipants = [...craving.participants, { ...user, joinedAt: now }];
   const newCount = newParticipants.length;
 
-  // Build updated candidate
   let updated: Craving = {
     ...craving,
     participants: newParticipants,
@@ -118,7 +121,7 @@ export function joinCravingPool(
 
 /**
  * Handles leaving an active craving pool.
- * Correctly recalculates tiers and downgrades discount if participant threshold drops.
+ * Correctly recalculates tiers and updates count parity.
  */
 export function leaveCravingPool(
   craving: Craving,
@@ -217,14 +220,15 @@ export function advanceToNextTier(craving: Craving): DealEngineResult {
 
 /**
  * Judge Demo Action: Force instant unlock.
- * Fills participants up to target with valid participant records.
+ * Only permitted on ACTIVE pools. Rejected on LOCKING, EXPIRED, CANCELLED, and UNLOCKED.
+ * Preserves original expiresAt timestamp without artificial extensions.
  */
 export function forceInstantUnlock(craving: Craving): DealEngineResult {
   if (craving.status === 'UNLOCKED') {
     return { craving, success: false, message: 'Deal is already unlocked.' };
   }
-  if (craving.status === 'EXPIRED' || craving.status === 'CANCELLED') {
-    return { craving, success: false, message: `Cannot unlock a ${craving.status} pool.` };
+  if (craving.status === 'LOCKING' || craving.status === 'EXPIRED' || craving.status === 'CANCELLED') {
+    return { craving, success: false, message: `Cannot force unlock a pool with status ${craving.status}.` };
   }
 
   const needed = Math.max(0, craving.target - craving.count);
@@ -247,7 +251,7 @@ export function forceInstantUnlock(craving: Craving): DealEngineResult {
     count: trans.craving.participants.length,
     currentTierId: tierProgress.currentTier?.id || null,
     dealDiscount: calculateOrderDiscount(trans.craving, trans.craving.budgetPerPerson),
-    expiresAt: now + 3600000, // extend expiry so UI reflects unlocked
+    // Preserve original expiresAt timestamp!
   };
 
   return { craving: unlocked, success: true, justUnlocked: true };
@@ -255,17 +259,14 @@ export function forceInstantUnlock(craving: Craving): DealEngineResult {
 
 /**
  * Judge Demo Action: Force instant expiration.
- * Guaranteed to respect the terminal rule (cannot expire an unlocked deal).
+ * Only permitted on ACTIVE pools. Rejected on LOCKING, EXPIRED, CANCELLED, and UNLOCKED.
  */
 export function forceInstantExpiration(craving: Craving): DealEngineResult {
   if (craving.status === 'UNLOCKED') {
     return { craving, success: false, message: 'Cannot expire an already unlocked deal.' };
   }
-  if (craving.status === 'EXPIRED') {
-    return { craving, success: false, message: 'Deal is already expired.' };
-  }
-  if (craving.status === 'CANCELLED') {
-    return { craving, success: false, message: 'Deal is cancelled.' };
+  if (craving.status === 'LOCKING' || craving.status === 'EXPIRED' || craving.status === 'CANCELLED') {
+    return { craving, success: false, message: `Cannot force expire a pool with status ${craving.status}.` };
   }
 
   const now = Date.now();

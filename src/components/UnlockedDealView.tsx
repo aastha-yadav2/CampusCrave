@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Zap, Sparkles, Utensils, ShieldCheck } from 'lucide-react';
 import { Craving, MenuItem, OrderItem } from '../types';
 import { formatCurrency } from '../utils/formatters';
-import { calculateOrderDiscount, calculateTierProgress } from '../engine/dealTiers';
+import { calculateOrderDiscount, calculateTierProgress, getAchievedReward } from '../engine/dealTiers';
 
 interface UnlockedDealViewProps {
   craving: Craving;
@@ -44,6 +44,7 @@ export const UnlockedDealView: React.FC<UnlockedDealViewProps> = ({
   const discount = itemTotal > 0 ? calculateOrderDiscount(craving, itemTotal) : 0;
   const finalTotal = Math.max(0, itemTotal - discount);
   const tierProgress = calculateTierProgress(craving);
+  const achievedReward = getAchievedReward(craving, itemTotal);
 
   return (
     <div className="max-w-2xl mx-auto space-y-6 pb-12 animate-fade-in">
@@ -190,10 +191,21 @@ export const UnlockedDealView: React.FC<UnlockedDealViewProps> = ({
               <span>Item Total</span>
               <span className="font-semibold">{formatCurrency(itemTotal)}</span>
             </div>
-            <div className="flex items-center justify-between text-xs text-emerald-600 font-bold">
-              <span>Campus Crave Pool Discount</span>
-              <span>- {formatCurrency(discount)}</span>
-            </div>
+            {discount > 0 && (
+              <div className="flex items-center justify-between text-xs text-emerald-600 font-bold">
+                <span>Campus Crave Pool Discount</span>
+                <span>- {formatCurrency(discount)}</span>
+              </div>
+            )}
+            {achievedReward.freeItemDescription && (
+              <div className="flex items-center justify-between text-xs text-brand-600 font-bold bg-brand-50/70 p-2.5 rounded-xl border border-brand-200">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-brand-500" />
+                  <span>Complimentary Pool Reward</span>
+                </span>
+                <span>{achievedReward.freeItemDescription} (FREE)</span>
+              </div>
+            )}
             <div className="flex items-center justify-between text-xs text-charcoal-500">
               <span>Delivery & Platform fee</span>
               <span className="text-emerald-600 font-semibold">FREE (Demo)</span>
